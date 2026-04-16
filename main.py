@@ -99,10 +99,13 @@ class SmartTutorPlugin(Star):
 
     async def terminate(self):
         """插件卸载时释放全局数据库连接资源。"""
-        if self.db is not None:
-            await self.db.close()
-            self.db = None
-            logger.info("数据库连接已安全关闭")
+        try:
+            if self.db is not None:
+                await self.db.close()
+                self.db = None
+                logger.info("数据库连接已安全关闭")
+        except Exception as e:
+            logger.exception("关闭数据库连接时出错: %s", e)
 
     @staticmethod
     def _extract_text_and_images(event: AstrMessageEvent) -> tuple[str, list[str]]:
@@ -132,6 +135,17 @@ class SmartTutorPlugin(Star):
         return json.dumps(payload, ensure_ascii=False)
 
     @staticmethod
+    def _clean_command_prefix(text: str) -> str:
+        """移除消息开头的指令前缀（如 /tutor, /助教, tutor, 助教）。"""
+        commands = ["/tutor", "/助教", "tutor", "助教"]
+        cleaned = text.strip()
+        for cmd in commands:
+            if cleaned.startswith(cmd):
+                cleaned = cleaned[len(cmd):].strip()
+                break
+        return cleaned
+
+    @staticmethod
     def _resolve_user_id(event: AstrMessageEvent, group_id: str) -> str:
         """优先保存 QQ 号，其次保存群号。"""
         sender = getattr(event.message_obj, "sender", None)
@@ -151,12 +165,16 @@ class SmartTutorPlugin(Star):
 
         user_text, image_inputs = self._extract_text_and_images(event)
 
+        # 清理指令前缀（框架消息中可能包含触发命令本身）
+        user_text = self._clean_command_prefix(user_text)
+
         if not user_text and not image_inputs:
             yield event.plain_result(
                 "请在 /tutor 或 /助教 后面发送题目文字，或者直接附上题目图片。"
             )
             return
 
+        # 第一层异常处理：调用大模型
         try:
             provider_id = await self.context.get_current_chat_provider_id(
                 umo=event.unified_msg_origin
@@ -172,13 +190,19 @@ class SmartTutorPlugin(Star):
             answer_text = (llm_resp.completion_text or "").strip()
             if not answer_text:
                 answer_text = "抱歉，这次没有生成可用答案，请稍后再试一次。"
-            else:
+
+            # 立即发送答案给用户
+            yield event.plain_result(answer_text)
+
+            # 第二层异常处理：保存数据库（轻量级，失败不影响用户体验）
+            try:
                 group_id = event.get_group_id()
                 user_id = self._resolve_user_id(event, group_id)
                 question_content = self._build_question_content(user_text, image_inputs)
                 await self.save_record(user_id, question_content, answer_text)
+            except Exception as db_exc:
+                logger.exception("智能助教保存记录失败: %s", db_exc)
 
-            yield event.plain_result(answer_text)
         except Exception as exc:
             logger.exception("智能助教调用 LLM 失败: %s", exc)
             yield event.plain_result("抱歉，助教的大脑暂时卡壳了，请稍后再试一下哦。")
