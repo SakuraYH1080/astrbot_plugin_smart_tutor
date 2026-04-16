@@ -9,13 +9,13 @@ from pathlib import Path
 
 import aiosqlite
 
-from astrbot import logger
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Plain
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, StarTools, register
 
 
-DB_PATH = Path(__file__).with_name("tutor_records.db")
+DB_PATH = Path(StarTools.get_data_dir()) / "tutor_records.db"
 _DB_CONNECTION: aiosqlite.Connection | None = None
 _DB_INIT_LOCK = asyncio.Lock()
 _DB_WRITE_LOCK = asyncio.Lock()
@@ -100,6 +100,15 @@ class SmartTutorPlugin(Star):
         except RuntimeError:
             pass
         logger.info("智能助教系统插件已初始化")
+
+    async def terminate(self):
+        """插件卸载时释放全局数据库连接资源。"""
+        global _DB_CONNECTION
+
+        if _DB_CONNECTION is not None:
+            await _DB_CONNECTION.close()
+            _DB_CONNECTION = None
+            logger.info("数据库连接已安全关闭")
 
     @staticmethod
     def _extract_text_and_images(event: AstrMessageEvent) -> tuple[str, list[str]]:
