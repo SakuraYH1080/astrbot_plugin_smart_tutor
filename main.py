@@ -5,7 +5,6 @@
 import asyncio
 import json
 import time
-from pathlib import Path
 
 import aiosqlite
 
@@ -13,58 +12,6 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
-
-
-DB_PATH = Path(StarTools.get_data_dir()) / "tutor_records.db"
-_DB_CONNECTION: aiosqlite.Connection | None = None
-_DB_INIT_LOCK = asyncio.Lock()
-_DB_WRITE_LOCK = asyncio.Lock()
-
-
-async def init_db() -> None:
-    """初始化本地 SQLite 数据库与表结构。"""
-    global _DB_CONNECTION
-
-    if _DB_CONNECTION is not None:
-        return
-
-    async with _DB_INIT_LOCK:
-        if _DB_CONNECTION is not None:
-            return
-
-        _DB_CONNECTION = await aiosqlite.connect(DB_PATH)
-        await _DB_CONNECTION.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tutor_records (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT NOT NULL,
-                question_content TEXT NOT NULL,
-                bot_reply TEXT NOT NULL,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        await _DB_CONNECTION.commit()
-        logger.info("智能助教数据库已初始化: %s", DB_PATH)
-
-
-async def save_record(user_id: str, question_content: str, bot_reply: str) -> None:
-    """保存一次助教问答记录。"""
-    await init_db()
-
-    if _DB_CONNECTION is None:
-        raise RuntimeError("数据库连接未初始化")
-
-    async with _DB_WRITE_LOCK:
-        await _DB_CONNECTION.execute(
-            """
-            INSERT INTO tutor_records (user_id, question_content, bot_reply)
-            VALUES (?, ?, ?)
-            """,
-            (user_id, question_content, bot_reply),
-        )
-        await _DB_CONNECTION.commit()
-        logger.info("智能助教记录已保存: user_id=%s saved_at=%s", user_id, time.time())
 
 
 @register(
@@ -95,19 +42,66 @@ class SmartTutorPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         self.context = context
-        try:
-            asyncio.get_running_loop().create_task(init_db())
-        except RuntimeError:
-            pass
+        self.db: aiosqlite.Connection | None = None
+        self.init_lock = asyncio.Lock()
+        self.write_lock = asyncio.Lock()
+        self.db_path = StarTools.get_data_dir() / "tutor_records.db"
         logger.info("智能助教系统插件已初始化")
+
+    async def init_db(self) -> None:
+        """初始化本地 SQLite 数据库与表结构。"""
+        if self.db is not None:
+            return
+
+        async with self.init_lock:
+            if self.db is not None:
+                return
+
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self.db = await aiosqlite.connect(self.db_path)
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tutor_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    question_content TEXT NOT NULL,
+                    bot_reply TEXT NOT NULL,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await self.db.commit()
+            logger.info("智能助教数据库已初始化: %s", self.db_path)
+
+    async def save_record(
+        self, user_id: str, question_content: str, bot_reply: str
+    ) -> None:
+        """保存一次助教问答记录。"""
+        await self.init_db()
+
+        if self.db is None:
+            raise RuntimeError("数据库连接未初始化")
+
+        async with self.write_lock:
+            await self.db.execute(
+                """
+                INSERT INTO tutor_records (user_id, question_content, bot_reply)
+                VALUES (?, ?, ?)
+                """,
+                (user_id, question_content, bot_reply),
+            )
+            await self.db.commit()
+            logger.info(
+                "智能助教记录已保存: user_id=%s saved_at=%s",
+                user_id,
+                time.time(),
+            )
 
     async def terminate(self):
         """插件卸载时释放全局数据库连接资源。"""
-        global _DB_CONNECTION
-
-        if _DB_CONNECTION is not None:
-            await _DB_CONNECTION.close()
-            _DB_CONNECTION = None
+        if self.db is not None:
+            await self.db.close()
+            self.db = None
             logger.info("数据库连接已安全关闭")
 
     @staticmethod
@@ -153,7 +147,7 @@ class SmartTutorPlugin(Star):
     @filter.command("tutor", alias={"助教"})
     async def tutor(self, event: AstrMessageEvent):
         """处理 `/tutor` 和 `/助教` 命令。"""
-        await init_db()
+        await self.init_db()
 
         user_text, image_inputs = self._extract_text_and_images(event)
 
@@ -182,7 +176,7 @@ class SmartTutorPlugin(Star):
                 group_id = event.get_group_id()
                 user_id = self._resolve_user_id(event, group_id)
                 question_content = self._build_question_content(user_text, image_inputs)
-                await save_record(user_id, question_content, answer_text)
+                await self.save_record(user_id, question_content, answer_text)
 
             yield event.plain_result(answer_text)
         except Exception as exc:
