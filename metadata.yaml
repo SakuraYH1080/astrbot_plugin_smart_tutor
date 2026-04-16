@@ -1,0 +1,6 @@
+name: astrbot_plugin_smart_tutor
+desc: 你的qq助教小机器人
+help: 发送 /学情分析 查看学情报告（此功能还在开发中）。发送 /助教 [图文内容] 进行题目解答。
+version: 1.0.0
+author: SakuraYH
+repo: https://github.com/SakuraYH1080/astrbot_plugin_smart_tutor
